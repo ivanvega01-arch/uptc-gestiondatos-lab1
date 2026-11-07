@@ -1,7 +1,7 @@
 ---
 title: "Laboratorio 1 · Organización en estado **Inicial**"
 subtitle: "Escalera de Madurez de Datos — Fundación Altiplano"
-author: "Escribe aquí tu nombre"
+author: "Iván Ricardo Vega Rodríguez"
 lang: es
 format:
   html:
@@ -113,7 +113,13 @@ names(fuente)[1:5]       # los nombres de las primeras cinco columnas
 **Pregunta 1.1.** Los encabezados no son encabezados. ¿Qué tiene este archivo encima de
 la tabla, y por qué constituye un problema para cualquier proceso automatizado?
 
-*Tu respuesta:*
+*Tu respuesta:* Encima de la tabla hay cuatro filas de presentación: el nombre de la
+fundación, un subtítulo, una fila vacía y el título «Contactos 2024». Los encabezados de
+verdad están en la fila 5. Por eso R toma «FUNDACIÓN ALTIPLANO» como nombre de la primera
+columna y deja las otras sin nombre. Cualquier programa que lea el archivo de forma
+automática (R, Power BI, Tableau) se equivoca igual. Y aunque lo arreglemos con `skip`, el
+día que alguien agregue o quite una fila decorativa ese número deja de servir y nadie se
+entera.
 
 ```{r}
 # TODO 1.2 — Vuelve a leer el archivo saltando las filas decorativas.
@@ -176,7 +182,13 @@ cat("Filas en la hoja:", nrow(borrador),
 que esa decisión la tome el analista, solo, en una línea de código? ¿A quién le
 corresponde?
 
-*Tu respuesta:*
+*Tu respuesta:* No. Decidir qué es un contacto válido es una regla del negocio, no una
+decisión técnica. Con el patrón `CT-#####` quedan por fuera `r nrow(borrador) - nrow(validos)`
+filas de la hoja. La mayoría son la tabla resumen por ciudad y filas en blanco, pero yo no
+puedo saber si alguna era un donante real con el ID mal escrito. Esa definición le
+corresponde al dueño del dato, que en este caso debería ser Marcela o el área de
+Desarrollo, y tiene que quedar escrita en el diccionario. Yo la puedo proponer y dejarla
+en el código, pero no aprobarla.
 
 ***
 
@@ -223,19 +235,36 @@ organización en nivel 1 no tiene escrito en ninguna parte.
 
 ```{r}
 # TODO 2.2 — Completa las reglas de validez que faltan.
+
+# Patrón de correo: algo, una @, algo, un punto y al menos dos letras.
+# Lo guardo en un nombre porque lo vuelvo a usar en la limpieza.
+PATRON_CORREO <- "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$"
+
+# tel_10(): deja solo los dígitos y, si quedan 12 y empiezan por 57,
+# quita ese prefijo de país. Así "+57 316-590-8595" queda en "3165908595".
+tel_10 <- function(x) {
+  d <- str_remove_all(coalesce(as.character(x), ""), "\\D")
+  if_else(str_length(d) == 12 & str_starts(d, "57"), str_sub(d, 3), d)
+}
+
 validez <- validos |>
   # transmute() crea columnas nuevas y descarta las demás.
   # Cada regla produce TRUE o FALSE por fila.
   transmute(
     # coalesce(correo, "") sustituye los NA por texto vacío, para que
     # str_detect() no devuelva NA y pueda contarse como incumplimiento.
-    # El patrón exige: algo, una @, algo, un punto y al menos dos letras.
-    correo_valido = str_detect(coalesce(correo, ""),
-                               "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$")
+    correo_valido = str_detect(coalesce(correo, ""), PATRON_CORREO),
 
-    # TODO: telefono_valido  -> ¿tiene 10 dígitos una vez quitas todo lo que no sea número?
-    # TODO: genero_valido    -> ¿el valor está dentro de un dominio aceptable?
-    # TODO: monto_valido     -> ¿se puede convertir a número?
+    # Teléfono: 10 dígitos después de quitar todo lo que no sea número y el 57.
+    telefono_valido = str_length(tel_10(telefono)) == 10,
+
+    # Género: el dominio que propongo es F o M. Cualquier otra grafía
+    # ("FEM", "masc", "Femenino") no cumple, aunque se entienda qué quiso decir.
+    genero_valido = coalesce(genero, "") %in% c("F", "M"),
+
+    # Monto: tiene que poder leerse como número tal como viene.
+    # "$ 118.800" no se puede: trae signo de pesos y puntos de miles.
+    monto_valido = !is.na(suppressWarnings(as.numeric(monto_ultima_donacion)))
   ) |>
   summarise(across(everything(), ~ round(100 * mean(.x), 1))) |>
   pivot_longer(everything(), names_to = "regla", values_to = "cumple_pct")
@@ -276,7 +305,23 @@ validos |>
 comparten ID pero difieren entre sí. ¿Se resuelven de la misma manera? ¿Cuál de los dos
 **no** puede resolverse con código, y por qué?
 
-*Tu respuesta:*
+```{r}
+# Cuántos IDs siguen repetidos después de quitar las copias exactas.
+conflictos <- validos |>
+  distinct() |>
+  count(id) |>
+  filter(n > 1)
+
+cat("IDs con datos distintos entre sus registros:", nrow(conflictos), "\n")
+```
+
+*Tu respuesta:* No se resuelven igual. Las `r sum(duplicated(validos))` filas idénticas son
+copias exactas: se quitan con `distinct()` y no se pierde nada. El problema son los
+`r nrow(conflictos)` IDs que, después de quitar esas copias, siguen apareciendo con datos
+distintos, como CT-00024, que tiene dos teléfonos diferentes. Eso no se puede resolver con
+código, porque el código no sabe cuál registro es el correcto. Puede ser la misma persona
+que cambió de número, o dos personas a las que les dieron el mismo ID. Eso lo tiene que
+revisar alguien que conozca a los donantes.
 
 ### 2.4 Consistencia
 
@@ -292,13 +337,28 @@ forma interna: **un mismo valor del mundo real escrito de varias maneras distint
 # count() agrupa por el valor de la columna y cuenta cuántas filas hay en cada grupo.
 # sort = TRUE las ordena de mayor a menor frecuencia.
 validos |> count(ciudad, sort = TRUE) |> head(10) |> kable()
+
+cat("Formas distintas de escribir la ciudad:", n_distinct(validos$ciudad), "\n")
+cat("Formas distintas de escribir el género:",
+    n_distinct(validos$genero[!vacio(validos$genero)]), "\n")
+
+# Solo las variantes de Bogotá:
+validos |>
+  filter(str_detect(tolower(sin_tilde(ciudad)), "^bog")) |>
+  count(ciudad, sort = TRUE) |>
+  kable()
 ```
 
 **Pregunta 2.4.** El tablero de la Fundación reporta *Bogotá* varias veces como si
 fueran ciudades distintas. ¿De quién es el problema: del analista de BI, de quien captura
 el dato, o de la organización?
 
-*Tu respuesta:*
+*Tu respuesta:* De la organización. El analista de BI muestra lo que recibe, y quien captura
+escribe como puede, porque nadie le dio una lista de ciudades ni un formato. Bogotá
+aparece escrita de siete maneras («Bogotá», «bogota», «BOGOTA», «Bogota D.C.», «BOG»...)
+porque no hay regla de captura ni dueño del dato. Si lo arreglo en Tableau, el problema
+vuelve con el siguiente archivo. Se arregla en el origen, con una lista desplegable en el
+formulario y una definición escrita.
 
 ***
 ## Paso 3 · Limpieza reproducible
@@ -342,37 +402,136 @@ parsear_fecha <- function(x) {
   salida   # lo que la función devuelve
 }
 
+# Ciudad: una tabla de equivalencias con el nombre oficial de cada ciudad.
+# La llave es la versión "aplanada" (sin tildes, en minúscula, sin "D.C.").
+ciudades <- c(bogota = "Bogotá", medellin = "Medellín", cali = "Cali",
+              barranquilla = "Barranquilla", bucaramanga = "Bucaramanga",
+              cartagena = "Cartagena", tunja = "Tunja", pereira = "Pereira",
+              manizales = "Manizales", villavicencio = "Villavicencio")
+
+unificar_ciudad <- function(x) {
+  llave <- x |>
+    trimws() |>
+    sin_tilde() |>
+    tolower() |>
+    str_remove("\\s*d\\.?\\s*c\\.?$")   # quita "D.C." al final
+  llave[llave == "bog"] <- "bogota"     # la abreviatura que usa alguien en captura
+  unname(ciudades[llave])               # si aparece una ciudad nueva, queda NA y se nota
+}
+
+# IDs que, quitando las copias exactas, siguen con datos distintos.
+ids_conflicto <- conflictos$id
+
 final <- validos |>
+  distinct() |>   # primero se van las filas idénticas: son copias, no se pierde nada
   transmute(
     contacto_id     = trimws(id),
     nombre_completo = str_squish(nombre_completo),   # colapsa espacios múltiples en uno
-    fecha_ingreso   = parsear_fecha(fecha_de_ingreso)
+    fecha_ingreso   = parsear_fecha(fecha_de_ingreso),
 
-    # TODO: correo   -> minúsculas, y NA si no tiene formato válido
-    # TODO: telefono -> sólo dígitos, quita el prefijo 57, NA si no quedan 10
-    # TODO: ciudad   -> unifica las variantes en un solo valor por ciudad
-    # TODO: genero   -> unifica a F / M / NA
-    # TODO: monto_ultima_donacion -> numérico
+    # Correo: en minúscula, y NA si no tiene formato válido.
+    correo = {
+      x <- tolower(trimws(correo))
+      if_else(str_detect(coalesce(x, ""), PATRON_CORREO), x, NA_character_)
+    },
+
+    # Teléfono: solo dígitos, sin el 57, y NA si no quedan 10.
+    telefono = {
+      t <- tel_10(telefono)
+      if_else(str_length(t) == 10, t, NA_character_)
+    },
+
+    ciudad = unificar_ciudad(ciudad),
+
+    # Género: todas las grafías de femenino a F y de masculino a M.
+    genero = case_when(
+      toupper(trimws(genero)) %in% c("F", "FEM", "FEMENINO")  ~ "F",
+      toupper(trimws(genero)) %in% c("M", "MASC", "MASCULINO") ~ "M",
+      .default = NA_character_
+    ),
+
+    # Monto: quito todo lo que no sea dígito ("$", espacios, puntos de miles).
+    monto_ultima_donacion = as.numeric(
+      na_if(str_remove_all(coalesce(monto_ultima_donacion, ""), "[^0-9]"), "")
+    ),
+
+    # Estado: "activo", "ACTIVO" y "Activo" son lo mismo.
+    estado = str_to_title(trimws(estado)),
+
+    # No borro los IDs en conflicto: los marco para que alguien los revise.
+    id_repetido = trimws(id) %in% ids_conflicto
   )
 
 cat("Registros tras limpieza:", nrow(final), "\n")
+cat("Registros marcados para revisión:", sum(final$id_repetido), "\n")
 ```
 
 **Pregunta 3.2.** ¿Eliminaste los registros con ID repetido o los marcaste para revisión?
 Defiende tu decisión ante una directora que pide «una base limpia para el viernes».
 
-*Tu respuesta:*
+*Tu respuesta:* Hice las dos cosas, según el caso. Las copias exactas las eliminé, porque son
+el mismo registro dos veces. Los `r sum(final$id_repetido)` registros que comparten ID pero
+tienen datos distintos no los borré: los dejé marcados en la columna `id_repetido`. Si los
+borro, puedo quedarme con el teléfono viejo y botar el nuevo, o eliminar a un donante
+real, y eso después no se recupera. A la directora le diría que la base sí está lista
+para el viernes, con una advertencia: hay `r sum(final$id_repetido)` registros que no
+conviene usar en campañas hasta que Desarrollo los revise. Prefiero entregar una base con
+alertas que una base que se ve limpia pero esconde errores.
 
 ```{r}
 # TODO 3.3 — Construye una tabla ANTES vs DESPUÉS de al menos cuatro indicadores.
-#            Sugerencia: % de correos válidos, formas distintas de escribir la ciudad,
-#            % de montos numéricos, formatos de fecha distintos.
+
+# formato_fecha(): dice en cuál de los formatos conocidos viene cada fecha.
+formato_fecha <- function(x) {
+  case_when(
+    str_detect(x, "^\\d{2}/\\d{2}/\\d{4}$")   ~ "dd/mm/aaaa",
+    str_detect(x, "^\\d{4}-\\d{2}-\\d{2}$")   ~ "aaaa-mm-dd",
+    str_detect(x, "^\\d{2}-[a-z]{3}-\\d{2}$") ~ "dd-mes-aa",
+    .default = "otro"
+  )
+}
+
+antes_despues <- tibble(
+  indicador = c("Registros",
+                "% de correos válidos",
+                "Formas distintas de escribir la ciudad",
+                "Formas distintas de escribir el género",
+                "% de montos que se leen como número",
+                "Formatos de fecha distintos"),
+  antes = c(
+    nrow(validos),
+    round(100 * mean(str_detect(coalesce(validos$correo, ""), PATRON_CORREO)), 1),
+    n_distinct(validos$ciudad),
+    n_distinct(validos$genero[!vacio(validos$genero)]),
+    round(100 * mean(!is.na(suppressWarnings(as.numeric(validos$monto_ultima_donacion)))), 1),
+    n_distinct(formato_fecha(trimws(validos$fecha_de_ingreso)))
+  ),
+  despues = c(
+    nrow(final),
+    round(100 * mean(!is.na(final$correo)), 1),
+    n_distinct(final$ciudad, na.rm = TRUE),
+    n_distinct(final$genero, na.rm = TRUE),
+    round(100 * mean(!is.na(final$monto_ultima_donacion)), 1),
+    1   # todas quedaron como fecha real (tipo Date)
+  )
+)
+
+kable(antes_despues)
 ```
 
 **Pregunta 3.4.** Revisa el porcentaje de correos válidos antes y después. ¿Subió? ¿Qué
 indica eso sobre lo que la limpieza **puede** y **no puede** corregir?
 
-*Tu respuesta:*
+*Tu respuesta:* Prácticamente no subió: pasó de
+`r round(100 * mean(str_detect(coalesce(validos$correo, ""), PATRON_CORREO)), 1)` % a
+`r round(100 * mean(!is.na(final$correo)), 1)` %, y esa pequeña diferencia viene de haber
+quitado las filas duplicadas, no de haber arreglado ningún correo. La limpieza arregla la
+forma de un dato que existe, como pasar el correo a
+minúscula, unificar una ciudad o leer un monto que traía signo de pesos. Lo que no puede
+hacer es inventar un dato que no está. Un correo vacío o escrito sin @ sigue sin servir;
+la diferencia es que ahora queda como NA y no pasa como si fuera bueno. Para recuperarlo
+hay que volver a contactar a la persona, o mejor, validar el correo en el momento de la
+captura.
 
 ***
 
@@ -384,15 +543,45 @@ código; parte sólo la puede completar el negocio.
 ```{r}
 # TODO 4.1 — Genera el diccionario: campo, tipo, completitud, valores únicos, ejemplo.
 #            Añade a mano: descripcion, dominio_permitido y responsable.
-#
-#            Útiles: names() para los campos, sapply(final, class) para los tipos,
-#            n_distinct() para los valores únicos.
+
+# Parte que sale del código.
+dicc_auto <- tibble(
+  campo          = names(final),
+  tipo           = sapply(final, function(x) class(x)[1]),
+  completitud    = sapply(final, function(x) round(100 * mean(!is.na(x)), 1)),
+  valores_unicos = sapply(final, n_distinct),
+  ejemplo        = sapply(final, function(x) as.character(x[!is.na(x)][1]))
+)
+
+# Parte que escribo a mano. El responsable queda pendiente a propósito:
+# no lo puedo decidir yo.
+dicc_manual <- tribble(
+  ~campo,                  ~descripcion,                                         ~dominio_permitido,                              ~responsable,
+  "contacto_id",           "Identificador del contacto en la base de donantes", "CT- y 5 dígitos, único por persona",            "Sin definir",
+  "nombre_completo",       "Nombre y apellido del donante",                     "Texto, sin espacios dobles",                    "Sin definir",
+  "fecha_ingreso",         "Fecha en que la persona entró a la base",           "Fecha AAAA-MM-DD, no posterior a hoy",          "Sin definir",
+  "correo",                "Correo para campañas y comunicaciones",             "usuario@dominio.ext, en minúscula",             "Sin definir",
+  "telefono",              "Celular de contacto",                               "10 dígitos, sin el prefijo 57",                 "Sin definir",
+  "ciudad",                "Ciudad donde vive el donante",                      "Una de las 10 ciudades de la lista",            "Sin definir",
+  "genero",                "Género que declara el donante",                     "F, M o vacío si no informa",                    "Sin definir",
+  "monto_ultima_donacion", "Valor de la última donación (supongo que en pesos)", "Número entero mayor que 0",                    "Sin definir",
+  "estado",                "Si el donante está activo o inactivo",              "Activo o Inactivo; falta definir cuándo cambia", "Sin definir",
+  "id_repetido",           "Marca técnica: el ID aparece con datos distintos",  "TRUE o FALSE",                                  "Analista de datos"
+)
+
+diccionario <- left_join(dicc_auto, dicc_manual, by = "campo")
+kable(diccionario)
 ```
 
 **Pregunta 4.2.** ¿Qué columna de tu diccionario **no puedes completar tú solo**? ¿Qué
 revela eso sobre el estado de gobierno de esta organización?
 
-*Tu respuesta:*
+*Tu respuesta:* La de responsable. Tampoco puedo cerrar del todo algunas descripciones y
+dominios: qué significa que un donante esté «Activo», en qué moneda está el monto o qué
+pasa cuando alguien no quiere informar su género. Yo puedo calcular el tipo, la
+completitud y los valores únicos, pero no puedo decidir quién responde por el dato. Que
+esa columna quede en «Sin definir» es la prueba de que la Fundación está en nivel 1: el
+archivo existe, pero nadie es dueño de él y no hay definiciones escritas.
 
 ***
 
@@ -406,18 +595,35 @@ eso.** El objetivo no es llegar al nivel 5: es llegar al **nivel 2**.
 # TODO 5.1 — Construye tu plan: entre 4 y 6 acciones, cada una con
 #            prioridad, por_que_ahora, responsable_propuesto y plazo.
 #            Al menos una debe atacar la causa EN EL ORIGEN, no el síntoma.
-#
-#            Sugerencia: arma un tibble() con esas columnas y muéstralo con kable().
+
+plan <- tribble(
+  ~prioridad, ~accion,                                                        ~por_que_ahora,                                                              ~responsable_propuesto,             ~plazo,
+  1,          "Nombrar una dueña de la base de contactos",                    "Hoy nadie decide qué es un registro válido ni quién puede cambiarlo",        "Dirección (propuesta: Marcela)",  "1 semana",
+  2,          "Formulario de captura con listas para ciudad, género y fecha", "Ataca la causa en el origen: las 27 formas de escribir la ciudad nacen ahí", "Marcela, con apoyo de TI",        "1 mes",
+  3,          "Revisar uno a uno los IDs en conflicto",                       "Son pocos y se pueden resolver ya; con más tiempo se mezclan más",          "Marcela (Desarrollo)",            "2 semanas",
+  4,          "Aprobar el diccionario de datos de una página",                "Sin dominios escritos la calidad no se puede medir",                        "Marcela y analista de datos",     "3 semanas",
+  5,          "Correr este código sobre cada archivo nuevo antes del tablero", "Evita que el tablero se rompa cada vez que cambia el archivo",               "Analista de datos",               "En cada corte mensual"
+)
+
+kable(plan)
 ```
 
 **Pregunta 5.2.** Si sólo pudieras ejecutar **una** de tus acciones, ¿cuál eliges y por qué?
 
-*Tu respuesta:*
+*Tu respuesta:* Nombrar a una dueña de la base. Sin eso, ninguna de las otras acciones tiene
+quién la apruebe ni quién la mantenga: el formulario nadie lo cuida, los IDs repetidos
+nadie los resuelve y el diccionario nadie lo actualiza. Es la acción que lleva a la
+Fundación de «nadie responde por los datos» a «hay alguien que responde», que es justo el
+paso del nivel 1 al nivel 2.
 
 **Pregunta 5.3.** Nombra una acción que deliberadamente **dejaste fuera** por no
 corresponder al nivel de madurez de esta organización, y explica por qué.
 
-*Tu respuesta:*
+*Tu respuesta:* Dejé por fuera crear un comité de gobierno de datos. En una fundación donde la
+base vive en el computador de una persona, un comité serían más reuniones que decisiones,
+y no habría a quién pedirle cuentas. Primero hace falta una dueña y unas reglas básicas de
+captura. Un comité tiene sentido cuando haya varias áreas con datos propios que se tengan
+que poner de acuerdo, y la Fundación todavía no está ahí.
 
 ***
 
@@ -457,21 +663,33 @@ Arrastra **`ciudad`** a Filas, igual que hiciste con el archivo sin limpiar.
 
 | | Archivo crudo | Tu archivo limpio |
 |---|---|---|
-| Valores distintos de ciudad | | |
-| Registros sin ciudad | | |
-| Formatos de fecha | | |
+| Valores distintos de ciudad | 14 en Tableau (`r n_distinct(validos$ciudad)` grafías en el archivo) | `r n_distinct(final$ciudad, na.rm = TRUE)` |
+| Registros sin ciudad | `r sum(vacio(validos$ciudad))` | `r sum(is.na(final$ciudad))` |
+| Formatos de fecha | `r n_distinct(formato_fecha(trimws(validos$fecha_de_ingreso)))` | 1 |
 
 **Pregunta 6.2.** Con el archivo crudo, Tableau mostraba 14 ciudades mientras el archivo
 contenía 27 grafías distintas, para 10 ciudades reales. ¿Cuántas muestra ahora, y a qué
 se debe el cambio?
 
-*Tu respuesta:*
+*Tu respuesta:* Ahora muestra `r n_distinct(final$ciudad, na.rm = TRUE)`, una por cada ciudad
+real. El cambio sale del código, no de Tableau: quité tildes, mayúsculas y el «D.C.»,
+convertí «BOG» en Bogotá y le asigné a cada ciudad un solo nombre oficial. Tableau ya no
+recibe 27 textos distintos sino 10, así que deja de partir una misma ciudad en varias
+barras.
 
 **Pregunta 6.3.** Ese `.csv` lo descargaste y lo subiste manualmente. Si mañana llega
 `contactos_2025.xlsx`, ¿qué parte de este trabajo se repite sola y qué parte hay que
 rehacer a mano? **Esa parte manual es donde se interrumpe el linaje.**
 
-*Tu respuesta:*
+*Tu respuesta:* Se repite solo todo lo que está escrito en el código: leer el archivo, saltar
+las filas decorativas, filtrar los IDs válidos, medir la calidad, limpiar los campos y
+escribir el CSV. Lo que hay que hacer a mano es lo que pasa después: exportar el CSV desde
+Posit, descargarlo y subirlo a Tableau, y revisar los IDs en conflicto. También habría que
+mirar si el archivo nuevo trae una forma nueva de escribir una ciudad o un cuarto formato
+de fecha, porque el código solo conoce los casos que ya vio (si aparece una ciudad nueva,
+queda como NA y por lo menos se nota). Esa descarga y esa subida manuales son el punto
+donde se corta el linaje: mirando el tablero, nadie puede saber de qué versión del
+archivo salió cada cifra.
 
 ***
 
